@@ -6,6 +6,7 @@ from datetime import datetime
 from dateutil import parser as date_parser
 import inspect
 import six
+import traceback
 
 import pymisp
 import requests
@@ -42,10 +43,11 @@ def misp_server_version(misp):
     :param misp: MISP connection object
     :type misp: :class:`pymisp.PyMISP`
     :return: MISP instance version as string
+    Comment Rocky: modification made, function fixed for latest pymisp version.
     """
     global _misp_server_version
     if _misp_server_version is None:
-        version = misp.get_version()
+        version = misp.version
         _misp_server_version = version['version']
     return _misp_server_version
 
@@ -59,9 +61,10 @@ def tag_event(misp, event, tag):
     :param event: a MISP event
     :param tag: tag to add
     :return: None
+    #Comment Rocky: modification made, function fixed for latest pymisp version.
     """
     if not hasattr(misp, '_otx_tags_cache'):
-        misp._otx_tags_cache = misp.get_all_tags()['Tag']
+        misp._otx_tags_cache = misp.tags()
     for exist_tag in misp._otx_tags_cache:
         if exist_tag['name'] == tag:
             tag_id = exist_tag['id']
@@ -111,7 +114,7 @@ def get_pulses(otx_api_key, from_timestamp=None):
     elif isinstance(from_timestamp, basestring):
         pulses = otx.getsince(from_timestamp)
     else:
-        raise ValueError("'from_timestamp' must be 'None', a datetime object or an ISO date string")
+        raise ValueError("'from_timestamp' must be 'None', a datetime object or an ISO date string such as ")
     return pulses
 
 
@@ -174,11 +177,11 @@ def create_events(pulse_or_list, author=False, server=False, key=False, misp=Fal
     if not misp and (server and key):
         log.debug("Connection to MISP instance: {}".format(server))
         try:
-            misp = pymisp.PyMISP(server, key, ssl=False, out_type='json')
+            misp = pymisp.PyMISP(server, key, ssl=False)
         except pymisp.PyMISPError as ex:
-            raise ImportException("Cannot connect to MISP instance: {}".format(ex.message))
+            raise ImportException("Cannot connect to MISP instance: {}".format(ex))
         except Exception as ex:
-            raise ImportException("Cannot connect to MISP instance, unknown exception: {}".format(ex.message))
+            raise ImportException("Cannot connect to MISP instance, unknown exception: {}".format(ex))
     if discover_tags:
         def get_tag_name(complete):
             parts = complete.split('=')
@@ -208,11 +211,13 @@ def create_events(pulse_or_list, author=False, server=False, key=False, misp=Fal
                                            bulk_tag=bulk_tag, dedup_titles=dedup_titles, stop_on_error=stop_on_error)
                 misp_events.append(misp_event)
             except Exception as ex:
+                traceback.print_exc()
                 if stop_on_error:
                     raise
                 name = ''
                 if pulse and 'name' in pulse:
                     name = pulse['name']
+                traceback.print_exc()
                 log.error("Cannot import pulse {}: {}".format(name, ex))
         return misp_events
 
@@ -255,7 +260,14 @@ def create_events(pulse_or_list, author=False, server=False, key=False, misp=Fal
 
     if misp:
         if not dedup_titles:
-            event = misp.new_event(distribution, threat_level, analysis, event_name, date=event_date, published=publish)
+            event = pymisp.MISPEvent()
+            event.distribution = distribution
+            event.threat_level_id = threat_level
+            event.analysis = analysis
+            event.info = event_name
+            event.set_date(event_date)
+            event.publish = publish
+            event_json = misp.add_event(event)
         else:
             event = ''
             # Check if username is added to title
@@ -269,8 +281,15 @@ def create_events(pulse_or_list, author=False, server=False, key=False, misp=Fal
             result = misp.search_index(eventinfo=event_name)
             if 'message' in result:
                 if result['message'] == "No matches.":
-                    event = misp.new_event(distribution, threat_level, analysis, event_name, date=event_date,
-                                           published=publish)
+                    event = pymisp.MISPEvent()
+                    event.distribution = distribution
+                    event.threat_level_id = threat_level
+                    event.analysis = analysis
+                    event.info = event_name
+                    event.set_date(event_date)
+                    event.publish = publish
+                    event_json = misp.add_event(event)
+#event = misp.new_event(distribution, threat_level, analysis, event_name, date=event_date, published=publish)
             else:
                 for evt in result['response']:
                     # If it exists, set 'event' to the event
@@ -278,12 +297,20 @@ def create_events(pulse_or_list, author=False, server=False, key=False, misp=Fal
                         if 'SharingGroup' in evt:
                             del evt['SharingGroup']  # This deletes the SharingGroup from the list, thx SparkyNZL
                         event = {'Event': evt}
+                        print(event)
                         break
                 if event == '':
                     # Event not found, even though search results were returned
                     # Build new event
-                    event = misp.new_event(distribution, threat_level, analysis, event_name, date=event_date,
-                                           published=publish)
+                    event = pymisp.MISPEvent()
+                    event.distribution = distribution
+                    event.threat_level_id = threat_level
+                    event.analysis = analysis
+                    event.info = event_name
+                    event.set_date(event_date)
+                    event.publish = publish
+                    event_json = misp.add_event(event)
+                    #event = misp.new_event(distribution, threat_level, analysis, event_name, date=event_date, published=publish)
 
         time.sleep(0.2)
         if tlp:
@@ -294,35 +321,38 @@ def create_events(pulse_or_list, author=False, server=False, key=False, misp=Fal
                 tag = "tlp:{}".format(pulse['tlp'])
             if tag is not None:
                 log.info("\t - Adding tag: {}".format(tag))
-                tag_event(misp, event, tag)
+                tag_event(misp, event_json, tag)
                 result_event['tags'].append(tag)
 
         if author_tag:
-            tag_event(misp, event, pulse['author_name'])
+            tag_event(misp, event_json, pulse['author_name'])
 
         if bulk_tag is not None:
-            tag_event(misp, event, bulk_tag)
+            tag_event(misp, event_json, bulk_tag)
 
     if misp and hasattr(misp, 'discovered_tags') and 'tags' in pulse:
         for pulse_tag in pulse['tags']:
             if pulse_tag.lower() in misp.discovered_tags:
                 tag = misp.discovered_tags[pulse_tag.lower()]
                 log.info("\t - Adding tag: {}".format(tag))
-                tag_event(misp, event, tag)
+                tag_event(misp, event_json, tag)
                 result_event['tags'].append(tag)
+
+# Adding MISP attributes is now: event = misp.add_attribute(args.event, {'type': args.type, 'value': args.value}, pythonify=True)
 
     if 'references' in pulse:
         for reference in pulse['references']:
             if reference:
                 log.info("\t - Adding external analysis link: {}".format(reference))
                 if misp:
-                    misp.add_named_attribute(event, 'link', reference, category='External analysis')
+                    #misp.add_named_attribute(event, 'link', reference, category='External analysis')
+                    misp.add_attribute(event, {'type': "link", 'value': reference })
                 result_event['attributes']['references'].append(reference)
 
     if misp and 'description' in pulse and isinstance(pulse['description'], six.text_type) and pulse['description']:
         log.info("\t - Adding external analysis comment")
-        misp.add_named_attribute(event, 'comment', pulse['description'], category='External analysis')
-
+        #misp.add_named_attribute(event, 'comment', pulse['description'], category='External analysis')
+        misp.add_attribute(event, {'type': "comment", 'value': pulse['description']})
     for ind in pulse['indicators']:
         ind_type = ind['type']
         ind_val = ind['indicator']
@@ -334,79 +364,92 @@ def create_events(pulse_or_list, author=False, server=False, key=False, misp=Fal
         if ind_type == 'FileHash-SHA256':
             log.info("\t - Adding SHA256 hash: {}".format(ind_val))
             if misp:
-                misp.add_hashes(event, sha256=ind_val, **ind_kwargs)
+                #misp.add_hashes(event, sha256=ind_val, **ind_kwargs)
+                misp.add_attribute(event, {'type': "sha256", 'value': ind_val})
             result_event['attributes']['hashes']['sha256'].append(ind_val)
 
         elif ind_type == 'FileHash-SHA1':
             log.info("\t - Adding SHA1 hash: {}".format(ind_val))
             if misp:
-                misp.add_hashes(event, sha1=ind_val, **ind_kwargs)
+                # misp.add_hashes(event, sha1=ind_val, **ind_kwargs)
+                misp.add_attribute(event, {'type': "sha1", 'value': ind_val})
             result_event['attributes']['hashes']['sha1'].append(ind_val)
 
         elif ind_type == 'FileHash-MD5':
             log.info("\t - Adding MD5 hash: {}".format(ind_val))
             if misp:
-                misp.add_hashes(event, md5=ind_val, **ind_kwargs)
+                #misp.add_hashes(event, md5=ind_val, **ind_kwargs)
+                misp.add_attribute(event, {'type': "md5", 'value': ind_val})
             result_event['attributes']['hashes']['md5'].append(ind_val)
 
         elif ind_type == 'URI' or ind_type == 'URL':
             log.info("\t - Adding URL: {}".format(ind_val))
             if misp:
-                misp.add_url(event, ind_val, **ind_kwargs)
+                #misp.add_url(event, ind_val, **ind_kwargs)
+                misp.add_attribute(event, {'type': "url", 'value': ind_val})
             result_event['attributes']['urls'].append(ind_val)
 
         elif ind_type == 'domain':
             log.info("\t - Adding domain: {}".format(ind_val))
             if misp:
-                misp.add_domain(event, ind_val, **ind_kwargs)
+                misp.add_attribute(event, {'type': "domain", 'value': ind_val})
+                #misp.add_domain(event, ind_val, **ind_kwargs)
             result_event['attributes']['domains'].append(ind_val)
 
         elif ind_type == 'hostname':
             log.info("\t - Adding hostname: {}".format(ind_val))
             if misp:
-                misp.add_hostname(event, ind_val, **ind_kwargs)
+                misp.add_attribute(event, {'type': "hostname", 'value': ind_val})
+                #misp.add_hostname(event, ind_val, **ind_kwargs)
             result_event['attributes']['hostnames'].append(ind_val)
 
         elif ind_type == 'IPv4' or ind_type == 'IPv6':
             log.info("\t - Adding ip: {}".format(ind_val))
             if misp:
-                misp.add_ipdst(event, ind_val, **ind_kwargs)
+                misp.add_attribute(event, {'type': "ip-src", 'value': ind_val})
+                #misp.add_ipdst(event, ind_val, **ind_kwargs)
             result_event['attributes']['ips'].append(ind_val)
 
         elif ind_type == 'email':
             log.info("\t - Adding email: {}".format(ind_val))
             if misp:
-                misp.add_email_dst(event, ind_val, **ind_kwargs)
+                misp.add_attribute(event, {'type': "email", 'value': ind_val})
+                #misp.add_email_dst(event, ind_val, **ind_kwargs)
             result_event['attributes']['emails'].append(ind_val)
 
         elif ind_type == 'Mutex':
             log.info("\t - Adding mutex: {}".format(ind_val))
             if misp:
-                misp.add_mutex(event, ind_val, **ind_kwargs)
+                misp.add_attribute(event, {'type': "mutex", 'value': ind_val})
+                #misp.add_mutex(event, ind_val, **ind_kwargs)
             result_event['attributes']['mutexes'].append(ind_val)
 
         elif ind_type == 'CVE':
             log.info("\t - Adding CVE: {}".format(ind_val))
             if misp:
-                misp.add_named_attribute(event, 'vulnerability', ind_val, category='External analysis', **ind_kwargs)
+                misp.add_attribute(event, {'type': "vulnerability", 'value': ind_val})
+                #misp.add_named_attribute(event, 'vulnerability', ind_val, category='External analysis', **ind_kwargs)
             result_event['attributes']['cves'].append(ind_val)
 
         elif ind_type == 'FileHash-IMPHASH':
             log.info("\t - Adding IMPHASH hash: {}".format(ind_val))
             if misp:
-                misp.add_named_attribute(event, 'imphash', ind_val, category='Artifacts dropped', **ind_kwargs)
+                misp.add_attribute(event, {'type': "imphash", 'value': ind_val})
+                #misp.add_named_attribute(event, 'imphash', ind_val, category='Artifacts dropped', **ind_kwargs)
             result_event['attributes']['hashes']['imphash'].append(ind_val)
 
         elif ind_type == 'FileHash-PEHASH':
             log.info("\t - Adding PEHASH hash: {}".format(ind_val))
             if misp:
-                misp.add_named_attribute(event, 'pehash', ind_val, category='Artifacts dropped', **ind_kwargs)
+                misp.add_attribute(event, {'type': "pehash", 'value': ind_val})
+                #misp.add_named_attribute(event, 'pehash', ind_val, category='Artifacts dropped', **ind_kwargs)
             result_event['attributes']['hashes']['pehash'].append(ind_val)
 
         elif ind_type == 'FilePath':
             log.info("\t - Adding filename: {}".format(ind_val))
             if misp:
-                misp.add_filename(event, ind_val, category='Artifacts dropped', **ind_kwargs)
+                misp.add_attribute(event, {'type': "filename", 'value': ind_val})
+                #misp.add_filename(event, ind_val, category='Artifacts dropped', **ind_kwargs)
             result_event['attributes']['filenames'].append(ind_val)
 
         elif ind_type == 'YARA':
@@ -424,13 +467,14 @@ def create_events(pulse_or_list, author=False, server=False, key=False, misp=Fal
                 continue
             log.info("\t - Adding YARA rule: {}".format(ind_title))
             if misp:
-                misp.add_yara(event, ind_val, category='Artifacts dropped', **ind_kwargs)
+                #misp.add_yara(event, ind_val, category='Artifacts dropped', **ind_kwargs)
+                misp.add_attribute(event, {'type': "yara", 'value': ind_val, "comment": ind_kwargs['comment']})
             result_event['attributes']['yara'].append({'title': ind_title, 'content': ind_val})
 
         else:
             log.warning("Unsupported indicator type: %s" % ind_type)
 
     if misp and publish:
-        event['Event']['published'] = False
+        event_json['Event']['published'] = False
         misp.publish(event)
     return result_event
